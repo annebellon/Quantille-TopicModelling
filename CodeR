@@ -1,0 +1,217 @@
+######## Quantilille  2021 ####
+####### Topic models #########
+
+##Manipulation de données
+library(dplyr)
+library(stringr)
+library(tibble)
+library(tidyr)
+library(stringi)
+
+#Lexicométrie
+library(quanteda)
+
+#Topic models
+library(topicmodels)
+library(ldatuning)### une librairie pour trouver le bon nombre de topics
+library(LDAvis) ### une librairie pour la visualisation des topics 
+
+#Visualisation
+library(FactoMineR)
+library(Factoshiny)
+library(ggpubr)
+
+####
+
+setwd("votre chemin")
+
+popu<-read.csv2("populisme.csv")
+
+
+#### 1. Prétravail de création du corpus
+
+popu$texte<-as.character(popu$texte)
+popu$Titre<-as.character(popu$Titre)
+
+# Enlever les doublons
+doublons <- which(duplicated(popu$Titre))
+popu<-popu[-doublons,]
+
+# Pour la suite enlever les apostrophes
+popu$texte<-str_replace_all(popu$texte,"'"," ")
+
+## Création du corpus avec quanteda
+cp <- corpus(popu$texte, 
+             docvars = select(popu,journal, auteurs, media), 
+             docnames = popu$Titre)
+
+toremove<-c(stopwords("french"),"a", "comme", "d", "aussi", "fait", 
+            "être", "c", "an?", "faire", "si", "il", 
+            "o?", "tout", "plu", "encore", "d?j?", "depuis",
+            "an", "entre", "n", "peut", "dont", "donc", 
+            "ainsi", "faut","va", "donc", "tou?", "alor",
+            "chez", "fois", "quand", "?galement", "plus", "y", 
+            "celui", "celle", "hui", "aujourd", "l","qu","or","ici", "?a", "d?",
+            "dit","pu","six","autres","font","ceux","peut",
+            "j","ni","là", "alors", "lors", "puis", "etc", "tel", 
+            "chaque", "ca", "veut", "toute", "qu", 
+            "peu", "moins", "très", "bien", "deux", "trois", "apr?s",
+            "avant", "h", "s", "notamment","tant","peuvent", 
+            "selon", "quelque", "toujours", "avoir", "car", "beaucoup", 
+            "sous", "non", "autre", "contre", "plusieurs", 
+            "autre", "toute", "fin", "heure", 
+            "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche", 
+            "dans", "pas", "me", "nos", "nous", "de", "vous", "sans", "mais"
+)
+
+
+dfm <- dfm(cp, remove_punct = TRUE, remove_numbers = TRUE, 
+           remove = toremove) 
+
+topfeatures(dfm, n=100)
+
+textstat_collocations(tk, min_count = 20, size = 3L) %>% 
+  arrange(desc(count)) %>% 
+  slice(1:30)
+
+dfm2<-dfm_trim(dfm, min_termfreq = 10)
+
+
+###### 2. Modèle Thématique
+
+dtm <- quanteda::convert(dfm2, to = "topicmodels")
+
+
+### 2.1 Paramétrage : trouver le bon nombre de thèmes
+
+tp_nb<-FindTopicsNumber(dtm, topics = seq (5, 20,1),
+                        metrics = c("Griffiths2004", "CaoJuan2009", 
+                                    "Arun2010", "Deveaud2014"), method = "Gibbs", 
+                        control = list(alpha = 0.6))
+
+
+#pdf ("meilleurtopic.pdf")
+FindTopicsNumber_plot(tp_nb)
+#dev.off()
+
+
+#### 2.2 Lancement de la modélisation  
+res_lda <- LDA(dtm, k = 13, method = "Gibbs", 
+               control = list(seed = 1979, alpha = 0.6))
+
+#### 2.3 Explorer les résultats du topic model
+
+terms(res_lda, 10)
+
+#Intégrer les variables topics à notre base de données
+
+colnames(popu)<-c("id","media","date","auteurs", 
+                  "soustitre", "texte", "journal", "presse")
+
+popu <- as.data.frame(posterior(res_lda)$topic) %>%
+  rename_all(funs(paste0("tp", .))) %>% 
+  rownames_to_column("id") %>% 
+  right_join(popu, by = "id")
+
+popu <- as.data.frame(posterior(res_lda)$topic) %>%
+  rownames_to_column("id") %>% 
+  gather(topic, value, -id) %>% 
+  group_by(id) %>% 
+  arrange(desc(value)) %>% 
+  slice(1) %>% ungroup() %>% 
+  right_join(popu, by =  "id")
+
+# Interpréter les thèmes et proposition de titres : 
+
+terms(res_lda,15)
+popu%>%
+  arrange(desc(tp13))%>%
+  slice(1:20)%>%
+  select("id", "journal", "texte")
+
+NomsTopics<-c("Misc", "Elite.Pol.Fr","US", "géopolitique", "Eco", "Russie",
+              "Europe", "Pol.Fr", "Justice", "Demo.Populisme", "Misc.cult", "Santé", "Pol.inter")
+
+## Tableau synthétique des thèmes
+
+tt<-matrix(NA,13,7)
+colnames(tt)<-c("Topic","Nom", "Moyenne","Ecart type", "Sup10", "Sup20", "Sup30")
+
+for(i in 1:13) {
+  tt[i,"Topic"]<-paste0("Topic ",i)
+  tt[i,"Nom"]<-NomsTopics[i]
+  tt[i,"Moyenne"]<-round(mean(unlist(popu[,i+3]), na.rm=T),3)
+  tt[i,"Ecart type"]<-round(sd(unlist(popu[,i+3]),na.rm=T),3)
+  tt[i,"Sup10"]<-as.numeric(length(which(popu[,i+3]>=0.1)))
+  tt[i,"Sup20"]<-as.numeric(length(which(popu[,i+3]>=0.2)))
+  tt[i,"Sup30"]<-as.numeric(length(which(popu[,i+3]>=0.3)))
+}
+
+terms<-apply(terms(res_lda, 5), 2, paste, collapse = ", ")
+
+tt<-as.data.frame(tt)
+tt<-cbind(tt,terms)
+
+#### 2.4 Analyse et visualisation
+
+# La librairie LDAvis
+topicmodels2LDAvis <- function(x, ...){
+  post <- topicmodels::posterior(x)
+  if (ncol(post[["topics"]]) < 3) stop("The model must contain > 2 topics")
+  mat <- x@wordassignments
+  LDAvis::createJSON(
+    phi = post[["terms"]], 
+    theta = post[["topics"]],
+    vocab = colnames(post[["terms"]]),
+    doc.length = slam::row_sums(mat, na.rm = TRUE),
+    term.frequency = slam::col_sums(mat, na.rm = TRUE)
+  )
+}
+
+lda_js <- topicmodels2LDAvis(res_lda)
+serVis(lda_js)
+
+# PCA
+popu.ca<-popu[,c(4:16,22,23)]
+Factoshiny(popu.ca)
+
+### MDS
+
+# à partir de la matrice articles / thèmes
+topic<-popu[4:16]
+colnames(topic)<-NomsTopics
+topic<-as.matrix(topic)
+ttopic<-t(topic) # Matrice transposée
+
+md<-dist(ttopic, method = "manhattan")
+fit <- cmdscale(md,eig=TRUE, k=2)
+fit
+
+# plot solution
+x <- fit$points[,1]
+y <- fit$points[,2]
+plot(x, y, xlab="Coordinate 1", ylab="Coordinate 2",
+     main="Metric MDS", type="n")
+text(x, y, labels = row.names(ttopic), cex=.7) 
+
+
+# à partir de la  matrice termes / thèmes 
+post <-posterior(res_lda)
+cor_mat <- cor(t(post[["terms"]]))
+colnames(cor_mat)<-NomsTopics
+rownames(cor_mat)<-NomsTopics
+
+md2<-dist(cor_mat, method="manhattan")
+
+##Amélioration graphique
+mds2<-cmdscale(md2)%>%
+  as.tibble
+colnames(mds2) <- c("Dim.1", "Dim.2")
+ggscatter(mds2, x = "Dim.1", y = "Dim.2", 
+          label = rownames(cor_mat),
+          size = 1,
+          repel = TRUE)
+
+fit <- cmdscale(md2,eig=TRUE, k=2)
+fit
+
